@@ -16,9 +16,10 @@ class Process(threading.Thread):
     # logging
     self.logger = logging.getLogger(self.name)
     self.logger.setLevel(logging.DEBUG)
-    formatter = logging.Formatter('%(threadName)s %(message)s')
-    handler = logging.StreamHandler()
-    # handler = logging.FileHandler('p{}.log'.format(pid))
+    # formatter = logging.Formatter('%(threadName)s %(message)s')
+    formatter = logging.Formatter('%(message)s')
+    # handler = logging.StreamHandler()
+    handler = logging.FileHandler('p{}.log'.format(pid))
     handler.setFormatter(formatter)
     self.logger.addHandler(handler)
 
@@ -33,11 +34,12 @@ class Process(threading.Thread):
   def run(self):
     self.pl = PerfectLink(self, self.procs)
     self.pfd = PerfectFailureDetector(self, self.pl, self.procs)
+    self.beb = BestEffortBroadcast(self, self.pl, self.procs)
 
     while not self.crashed:
       if not self.queues[self.pid].empty():
         message = self.queues[self.pid].get()
-        self.logger.debug('got {} from {} - {}'.format(
+        self.logger.debug('{} from {} - {}'.format(
           message['type'],
           message['src'],
           message['content'],
@@ -58,6 +60,24 @@ class Process(threading.Thread):
             self.pl.delivered.add(message['id'])
             self.pl.deliver(message['src'], message)
       time.sleep(0.1)
+
+# ========================================================================
+# BEB
+# ========================================================================
+
+class BestEffortBroadcast():
+  def __init__(self, process, pl, procs):
+    self.process = process
+    self.pl = pl
+    self.procs = procs
+
+  def broadcast(self, message):
+    if not self.process.crashed:
+      for i in range(0, len(self.procs)):
+        self.pl.send(i, message)
+
+  def deliver(self, pid, message):
+    self.process.logger.debug('BEB_DELIVER from {} - {}'.format(pid, message['content']))
 
 # ========================================================================
 # PFD
@@ -104,6 +124,8 @@ class PerfectLink():
       self.send(message['src'], 'HEARTBEAT_REPLY')
     elif message['content'] == 'HEARTBEAT_REPLY':
       self.process.pfd.alive.add(self.procs[pid].name)
+    else:
+      self.process.beb.deliver(pid, message)
 
   def send(self, pid, message):
     message = {

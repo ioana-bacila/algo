@@ -30,5 +30,7 @@ if __name__ == '__main__':
     if command[0] == 'k':
       pid = int(command[1])
       procs[pid].crashed = True
-    elif command[0] == 'z':
-      pass
+    elif command[0] == 'b':
+      pid = int(command[1])
+      message = command[2]
+      procs[pid].beb.broadcast(message)
