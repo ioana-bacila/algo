@@ -35,7 +35,7 @@ class Process(threading.Thread):
     self.pl = PerfectLink(self, self.procs)
     self.pfd = PerfectFailureDetector(self, self.pl, self.procs)
     self.beb = BestEffortBroadcast(self, self.pl, self.procs)
-    self.oaar = OneAllAtomicRegister(self, self.beb, self.pfd, self.pl, self.procs)
+    self.aaar = AllAllAtomicRegister(self, self.beb, self.pfd, self.pl, self.procs)
 
     while not self.crashed:
       if not self.queues[self.pid].empty():
@@ -63,16 +63,53 @@ class Process(threading.Thread):
       time.sleep(0.1)
 
 # ========================================================================
-# OAAR (Read-Impose Write-All)
+# AAAR
 # ========================================================================
 
-class OneAllAtomicRegister():
+class AllAllAtomicRegister():
   def __init__(self, process, beb, pfd, pl, procs):
     self.process = process
     self.beb = beb
     self.pfd = pfd
     self.pl = pl
     self.procs = procs
+
+    self.val = None
+    self.writing = False
+    self.readlist = []
+    self.regs = []
+    for i in range(0, len(self.procs)):
+      reg = OneAllAtomicRegister(self.process, self.beb, self.pfd, self.pl, self.procs, i)
+      self.regs.append(reg)
+
+  def write_return(self):
+    self.process.logger.debug('AAAR WRITE_RETURN with value {}'.format(self.val))
+
+  def write(self, v):
+    self.val = v
+    self.writing = True
+    for reg in self.regs:
+      reg.read()
+
+  def read_return(self, val):
+    print val
+
+  def read(self):
+    for reg in self.regs:
+      reg.read()
+
+# ========================================================================
+# OAAR (Read-Impose Write-All)
+# ========================================================================
+
+class OneAllAtomicRegister():
+  def __init__(self, process, beb, pfd, pl, procs, rid):
+    self.process = process
+    self.beb = beb
+    self.pfd = pfd
+    self.pl = pl
+    self.procs = procs
+    self.rid = rid
 
     self.ts = ''
     self.val = None
@@ -81,19 +118,30 @@ class OneAllAtomicRegister():
     self.readval = None
     self.reading = False
 
-  def read_return(self, val):
-    print val
+  def read_return(self, pid, ts, val):
+    self.process.aaar.readlist.append((ts, pid, val))
+    if len(self.process.aaar.readlist) == len(self.procs):
+      self.process.aaar.readlist.sort(reverse=True)
+      ts, pid, val = self.process.aaar.readlist[0]
+      self.process.aaar.readlist = []
+      if self.process.aaar.writing == True:
+        self.process.aaar.writing = False
+        self.write(self.process.aaar.val)
+      else:
+        self.process.aaar.read_return(val)
+    # print val
 
   def read(self):
     self.reading = True
     self.readval = self.val
-    self.beb.broadcast('WRITE_{}_{}'.format(self.ts, self.val))
+    self.beb.broadcast('WRITE_{}_{}_{}'.format(self.ts, self.val, self.rid))
 
   def write_return(self):
     self.process.logger.debug('WRITE_RETURN with value {}'.format(self.val))
+    self.process.aaar.write_return()
 
   def write(self, v):
-    self.beb.broadcast('WRITE_{}_{}'.format(str(uuid.uuid1()), v))
+    self.beb.broadcast('WRITE_{}_{}_{}'.format(str(uuid.uuid1()), v, self.rid))
 
 # ========================================================================
 # BEB
@@ -114,10 +162,13 @@ class BestEffortBroadcast():
     if 'WRITE_' in message['content']:
       ts = message['content'].split('_')[1]
       val = message['content'].split('_')[2]
-      if ts > self.procs[pid].oaar.ts:
-        self.procs[pid].oaar.ts = ts
-        self.procs[pid].oaar.val = val
-      self.pl.send(pid, 'ACK')
+      rid = int(message['content'].split('_')[3])
+      if ts > self.procs[pid].aaar.regs[rid].ts:
+        self.procs[pid].aaar.regs[rid].ts = ts
+        self.procs[pid].aaar.regs[rid].val = val
+        # also set the aaar value
+        self.procs[pid].aaar.val = val
+      self.pl.send(pid, 'ACK_{}'.format(rid))
     self.process.logger.debug('BEB_DELIVER from {} - {}'.format(pid, message['content']))
 
 # ========================================================================
@@ -144,17 +195,18 @@ class PerfectFailureDetector():
           self.crash(i)
         self.pl.send(i, 'HEARTBEAT_REQUEST')
       self.alive.clear()
-      time.sleep(5)
+      time.sleep(10)
 
   def crash(self, pid):
     # code duplicated to emulate UPON CONDITION
-    if self.process.oaar.correct <= self.process.oaar.writeset:
-      self.process.oaar.writeset = set()
-      if self.process.oaar.reading:
-        self.process.oaar.reading = False
-        self.process.oaar.read_return(self.process.oaar.readval)
-      else:
-        self.process.oaar.write_return()
+    for reg in self.process.aaar.regs:
+      if reg.correct <= reg.writeset:
+        reg.writeset = set()
+        if reg.reading:
+          reg.reading = False
+          reg.read_return(self.process.pid, self.process.oarr.ts, reg.readval)
+        else:
+          reg.write_return()
     self.process.logger.debug('process {} has crashed'.format(pid))
 
 # ========================================================================
@@ -173,16 +225,17 @@ class PerfectLink():
       self.send(message['src'], 'HEARTBEAT_REPLY')
     elif message['content'] == 'HEARTBEAT_REPLY':
       self.process.pfd.alive.add(self.procs[pid].name)
-    elif message['content'] == 'ACK':
-      self.process.oaar.writeset.add(self.procs[pid].name)
+    elif 'ACK' in message['content']:
+      rid = int(message['content'].split('_')[1])
+      self.process.aaar.regs[rid].writeset.add(self.procs[pid].name)
       # code duplicated to emulate UPON CONDITION
-      if self.process.oaar.correct <= self.process.oaar.writeset:
-        self.process.oaar.writeset = set()
-        if self.process.oaar.reading:
-          self.process.oaar.reading = False
-          self.process.oaar.read_return(self.process.oaar.readval)
+      if self.process.aaar.regs[rid].correct <= self.process.aaar.regs[rid].writeset:
+        self.process.aaar.regs[rid].writeset = set()
+        if self.process.aaar.regs[rid].reading:
+          self.process.aaar.regs[rid].reading = False
+          self.process.aaar.regs[rid].read_return(self.process.pid, self.process.aaar.regs[rid].ts, self.process.aaar.regs[rid].readval)
         else:
-          self.process.oaar.write_return()
+          self.process.aaar.regs[rid].write_return()
     else:
       self.process.beb.deliver(pid, message)
 

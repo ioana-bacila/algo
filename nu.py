@@ -40,3 +40,10 @@ if __name__ == '__main__':
     elif command[0] == 'r':
       pid = int(command[1])
       procs[pid].oaar.read()
+    elif command[0] == 'aw':
+      pid = int(command[1])
+      message = command[2]
+      procs[pid].aaar.write(message)
+    elif command[0] == 'ar':
+      pid = int(command[1])
+      procs[pid].aaar.read()
