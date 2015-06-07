@@ -10,12 +10,11 @@ if __name__ == '__main__':
 
   # init
   queues = []
+  procs = []
   for i in range(0, PROC_COUNT):
     q = Queue.Queue()
     queues.append(q)
-  procs = []
-  for i in range(0, PROC_COUNT):
-    p = Process(i, queues)
+    p = Process(i, queues, procs)
     procs.append(p)
 
   # start
@@ -23,11 +22,13 @@ if __name__ == '__main__':
     proc.start()
 
   # input
-  procs[0].pl.send(1, 'penis')
+  print 'Yes, master?'
   while True:
-    command = raw_input('Yes, master?\n')
+    command = raw_input()
     print 'So be it!'
-    if command == 'exit':
-      break
-    else:
-      print command
+    command = command.split(' ')
+    if command[0] == 'k':
+      pid = int(command[1])
+      procs[pid].crashed = True
+    elif command[0] == 'z':
+      pass

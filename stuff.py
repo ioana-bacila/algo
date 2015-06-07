@@ -1,17 +1,22 @@
 import logging
 import threading
 import time
+import uuid
 
+
+# ========================================================================
+# PROCESS
+# ========================================================================
 
 class Process(threading.Thread):
-  def __init__(self, pid, queues):
+  def __init__(self, pid, queues, procs):
     threading.Thread.__init__(self)
     self.setName('Process-{}'.format(pid))
 
     # logging
     self.logger = logging.getLogger(self.name)
     self.logger.setLevel(logging.DEBUG)
-    formatter = logging.Formatter('%(message)s', datefmt='%H:%M:%S')
+    formatter = logging.Formatter('%(threadName)s %(message)s')
     handler = logging.StreamHandler()
     # handler = logging.FileHandler('p{}.log'.format(pid))
     handler.setFormatter(formatter)
@@ -20,34 +25,19 @@ class Process(threading.Thread):
     # init params
     self.pid = pid
     self.queues = queues
+    self.procs = procs
 
     # init defaults
     self.crashed = False
-    self.q = queues[pid]
-    self.pl = PerfectLink(self)
 
   def run(self):
-    self.pl.run()
+    self.pl = PerfectLink(self, self.procs)
+    self.pfd = PerfectFailureDetector(self, self.pl, self.procs)
 
-
-
-
-class PerfectLink():
-  def __init__(self, process):
-    self.process = process
-
-    self.delivered = set()
-
-  def run(self):
-    while not self.process.crashed:
-      if not self.process.q.empty():
-        message = self.process.q.get()
-        if message['type'] in ['SEND', 'DELIVER']:
-          indent = ''
-        else:
-          indent = '  '
-        self.process.logger.debug(indent + '{} got {} from {} - {}  #{}'.format(
-          self.process.name,
+    while not self.crashed:
+      if not self.queues[self.pid].empty():
+        message = self.queues[self.pid].get()
+        self.logger.debug('got {} from {} - {}'.format(
           message['type'],
           message['src'],
           message['content'],
@@ -59,22 +49,65 @@ class PerfectLink():
           message = {
             'id': message['id'],
             'type': 'DELIVER',
-            'src': self.process.pid,
-            'content': None,
+            'src': self.pid,
+            'content': message['content'],
           }
-          self.process.queues[dest].put(message)
+          self.queues[dest].put(message)
         elif message['type'] == 'DELIVER':
-          if message['id'] not in self.delivered:
-            self.delivered.add(message['id'])
-            self.deliver(message['src'], message)
+          if message['id'] not in self.pl.delivered:
+            self.pl.delivered.add(message['id'])
+            self.pl.deliver(message['src'], message)
       time.sleep(0.1)
 
+# ========================================================================
+# PFD
+# ========================================================================
+
+class PerfectFailureDetector():
+  def __init__(self, process, pl, procs):
+    self.process = process
+    self.pl = pl
+    self.procs = procs
+
+    self.alive = set([x.name for x in procs])
+    self.detected = set()
+    self.thread = threading.Timer(0, self.run)
+    self.thread.setName('PFD-{}'.format(self.process.pid))
+    self.thread.start()
+
+  def run(self):
+    while not self.process.crashed:
+      for i in range(0, len(self.procs)):
+        if self.procs[i].name not in self.alive and self.procs[i].name not in self.detected:
+          self.detected.add(self.procs[i].name)
+          self.crash(i)
+        self.pl.send(i, 'HEARTBEAT_REQUEST')
+      self.alive = set()
+      time.sleep(5)
+
+  def crash(self, pid):
+    self.process.logger.debug('process {} has crashed'.format(pid))
+
+# ========================================================================
+# PL
+# ========================================================================
+
+class PerfectLink():
+  def __init__(self, process, procs):
+    self.process = process
+    self.procs = procs
+
+    self.delivered = set()
+
   def deliver(self, pid, message):
-    pass
+    if message['content'] == 'HEARTBEAT_REQUEST':
+      self.send(message['src'], 'HEARTBEAT_REPLY')
+    elif message['content'] == 'HEARTBEAT_REPLY':
+      self.process.pfd.alive.add(self.procs[pid].name)
 
   def send(self, pid, message):
     message = {
-      'id': '{}-{}'.format(time.time(), message),
+      'id': uuid.uuid4().hex,
       'type': 'SEND',
       'src': self.process.pid,
       'content': message,
