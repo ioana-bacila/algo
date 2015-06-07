@@ -34,3 +34,6 @@ if __name__ == '__main__':
       pid = int(command[1])
       message = command[2]
       procs[pid].beb.broadcast(message)
+    elif command[0] == 'q':
+      pid = int(command[1])
+      print procs[pid].hc.proposal

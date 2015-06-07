@@ -35,7 +35,9 @@ class Process(threading.Thread):
     self.pl = PerfectLink(self, self.procs)
     self.pfd = PerfectFailureDetector(self, self.pl, self.procs)
     self.beb = BestEffortBroadcast(self, self.pl, self.procs)
+    self.hc = HierarchicalConsensus(self, self.beb, self.pfd, self.procs)
 
+    delay = 5
     while not self.crashed:
       if not self.queues[self.pid].empty():
         message = self.queues[self.pid].get()
@@ -59,6 +61,38 @@ class Process(threading.Thread):
           if message['id'] not in self.pl.delivered:
             self.pl.delivered.add(message['id'])
             self.pl.deliver(message['src'], message)
+      delay = delay - 0.1
+      if delay <= 0:
+        self.hc.work()
+      time.sleep(0.1)
+
+# ========================================================================
+# HIERARCHICAL CONSENSUS
+# ========================================================================
+
+class HierarchicalConsensus():
+  def __init__(self, process, beb, pfd, procs):
+    self.process = process
+    self.beb = beb
+    self.pfd = pfd
+    self.procs = procs
+
+    self.detectedranks = set()
+    self.round = 0
+    self.proposal = None
+    self.proposer = -1
+    self.delivered = [None] * len(self.procs)
+    self.broadcast = False
+
+  def work(self):
+    self.proposal = str(uuid.uuid1())
+    if self.round < len(self.procs):
+      if self.round == self.process.pid and self.proposal != None and self.broadcast == False:
+        self.broadcast = True
+        self.process.beb.broadcast('DECIDED_{}'.format(self.proposal))
+        self.process.logger.debug('DECIDED by {} - {}'.format(self.process.pid, self.proposal))
+      if self.round in self.detectedranks or self.delivered[self.round] == True:
+        self.round += 1
       time.sleep(0.1)
 
 # ========================================================================
@@ -77,6 +111,13 @@ class BestEffortBroadcast():
         self.pl.send(i, message)
 
   def deliver(self, pid, message):
+    rank = pid
+    v = message['content'].split('_')[1]
+    if self.process.pid < rank and self.process.pid > self.procs[pid].hc.proposer:
+      self.procs[pid].hc.proposal = v
+      self.procs[pid].hc.proposer = rank
+      self.procs[pid].logger.debug('ADOPTED {} from {}'.format(v, self.process.pid))
+    self.process.hc.delivered[rank] = True
     self.process.logger.debug('BEB_DELIVER from {} - {}'.format(pid, message['content']))
 
 # ========================================================================
@@ -107,6 +148,7 @@ class PerfectFailureDetector():
 
   def crash(self, pid):
     self.process.logger.debug('process {} has crashed'.format(pid))
+    self.process.hc.detectedranks.add(pid)
 
 # ========================================================================
 # PL
