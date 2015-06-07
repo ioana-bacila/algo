@@ -35,6 +35,7 @@ class Process(threading.Thread):
     self.pl = PerfectLink(self, self.procs)
     self.pfd = PerfectFailureDetector(self, self.pl, self.procs)
     self.beb = BestEffortBroadcast(self, self.pl, self.procs)
+    self.oaar = OneAllAtomicRegister(self, self.beb, self.pfd, self.pl, self.procs)
 
     while not self.crashed:
       if not self.queues[self.pid].empty():
@@ -62,6 +63,39 @@ class Process(threading.Thread):
       time.sleep(0.1)
 
 # ========================================================================
+# OAAR (Read-Impose Write-All)
+# ========================================================================
+
+class OneAllAtomicRegister():
+  def __init__(self, process, beb, pfd, pl, procs):
+    self.process = process
+    self.beb = beb
+    self.pfd = pfd
+    self.pl = pl
+    self.procs = procs
+
+    self.ts = ''
+    self.val = None
+    self.correct = self.pfd.alive
+    self.writeset = set()
+    self.readval = None
+    self.reading = False
+
+  def read_return(self, val):
+    print val
+
+  def read(self):
+    self.reading = True
+    self.readval = self.val
+    self.beb.broadcast('WRITE_{}_{}'.format(self.ts, self.val))
+
+  def write_return(self):
+    self.process.logger.debug('WRITE_RETURN with value {}'.format(self.val))
+
+  def write(self, v):
+    self.beb.broadcast('WRITE_{}_{}'.format(str(uuid.uuid1()), v))
+
+# ========================================================================
 # BEB
 # ========================================================================
 
@@ -77,6 +111,13 @@ class BestEffortBroadcast():
         self.pl.send(i, message)
 
   def deliver(self, pid, message):
+    if 'WRITE_' in message['content']:
+      ts = message['content'].split('_')[1]
+      val = message['content'].split('_')[2]
+      if ts > self.procs[pid].oaar.ts:
+        self.procs[pid].oaar.ts = ts
+        self.procs[pid].oaar.val = val
+      self.pl.send(pid, 'ACK')
     self.process.logger.debug('BEB_DELIVER from {} - {}'.format(pid, message['content']))
 
 # ========================================================================
@@ -102,10 +143,18 @@ class PerfectFailureDetector():
           self.detected.add(self.procs[i].name)
           self.crash(i)
         self.pl.send(i, 'HEARTBEAT_REQUEST')
-      self.alive = set()
+      self.alive.clear()
       time.sleep(5)
 
   def crash(self, pid):
+    # code duplicated to emulate UPON CONDITION
+    if self.process.oaar.correct <= self.process.oaar.writeset:
+      self.process.oaar.writeset = set()
+      if self.process.oaar.reading:
+        self.process.oaar.reading = False
+        self.process.oaar.read_return(self.process.oaar.readval)
+      else:
+        self.process.oaar.write_return()
     self.process.logger.debug('process {} has crashed'.format(pid))
 
 # ========================================================================
@@ -124,12 +173,22 @@ class PerfectLink():
       self.send(message['src'], 'HEARTBEAT_REPLY')
     elif message['content'] == 'HEARTBEAT_REPLY':
       self.process.pfd.alive.add(self.procs[pid].name)
+    elif message['content'] == 'ACK':
+      self.process.oaar.writeset.add(self.procs[pid].name)
+      # code duplicated to emulate UPON CONDITION
+      if self.process.oaar.correct <= self.process.oaar.writeset:
+        self.process.oaar.writeset = set()
+        if self.process.oaar.reading:
+          self.process.oaar.reading = False
+          self.process.oaar.read_return(self.process.oaar.readval)
+        else:
+          self.process.oaar.write_return()
     else:
       self.process.beb.deliver(pid, message)
 
   def send(self, pid, message):
     message = {
-      'id': uuid.uuid4().hex,
+      'id': str(uuid.uuid1()),
       'type': 'SEND',
       'src': self.process.pid,
       'content': message,
